@@ -26,7 +26,7 @@ jobs:
     name: Update Documentation
     runs-on: ubuntu-latest
     # Only run on release commits or manual triggers
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release') }}
+    if: "github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore: release')"
 
     steps:
       - name: Checkout instantsearch

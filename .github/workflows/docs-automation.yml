@@ -19,7 +19,7 @@ on:
         type: boolean
       max_turns:
         description: 'Max Claude turns (increase if hitting limit)'
-        default: 25
+        default: 50
         type: number
 
 permissions:
@@ -66,6 +66,8 @@ jobs:
           If you cannot access a file, skip it and work with what you have.
           If there are no documentable changes, report that finding and exit successfully.
 
+          BE EFFICIENT: You have limited turns. Read multiple files in parallel when possible. Don't over-explore.
+
           ## Repository Layout
 
           You are running from the root directory where:
@@ -80,9 +82,9 @@ jobs:
              - instantsearch/packages/react-instantsearch-core/CHANGELOG.md
              - instantsearch/packages/vue-instantsearch/CHANGELOG.md
 
-          2. Explore the docs-new/ documentation repository to understand its structure:
-             - Use Glob to find InstantSearch-related docs in docs-new/
-             - Read a few existing widget/hook docs to understand the format
+          2. Find and read ONE existing doc as a format reference:
+             - Use Glob to find InstantSearch widget docs: docs-new/**/instantsearch/**/*.mdx
+             - Read just ONE example file to understand the format (don't read many)
 
           3. Update documentation for any new features, modified components, or breaking changes.
 
@@ -124,7 +126,7 @@ jobs:
           Read source files to understand APIs, types, and implementation.
           Example: instantsearch/packages/instantsearch.js/src/widgets/" \
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cd docs-new && npm run check:links),Bash(git diff *),Bash(git status *)" \
-            --max-turns ${{ inputs.max_turns || 25 }} \
+            --max-turns ${{ inputs.max_turns || 50 }} \
             --output-format text
 
       - name: Show what Claude would do (dry run)

@@ -17,6 +17,10 @@ on:
         description: 'Create PR'
         default: false
         type: boolean
+      max_turns:
+        description: 'Max Claude turns (increase if hitting limit)'
+        default: 25
+        type: number
 
 permissions:
   contents: read
@@ -120,7 +124,7 @@ jobs:
           Read source files to understand APIs, types, and implementation.
           Example: instantsearch/packages/instantsearch.js/src/widgets/" \
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cd docs-new && npm run check:links),Bash(git diff *),Bash(git status *)" \
-            --max-turns 25 \
+            --max-turns ${{ inputs.max_turns || 25 }} \
             --output-format text
 
       - name: Show what Claude would do (dry run)

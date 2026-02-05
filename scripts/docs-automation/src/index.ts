@@ -3,50 +3,61 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import {
-  parseAllChangelogs,
-  parseChangelog,
-  classifyChanges,
-  getLatestRelease,
-} from './changelog/index';
-
-import type { CLIOptions, ChangeEntry, DocumentationNeed } from './types';
+/**
+ * Main packages that have widget/hook documentation.
+ */
+const MAIN_DOC_PACKAGES = [
+  'instantsearch.js',
+  'react-instantsearch',
+  'vue-instantsearch',
+];
 
 /**
- * Represents a released package detected from the release commit.
+ * Maps package names to their documentation flavor suffix.
  */
-interface ReleasedPackage {
-  name: string;
+const PACKAGE_TO_FLAVOR: Record<string, string> = {
+  'instantsearch.js': 'js',
+  'react-instantsearch': 'react',
+  'vue-instantsearch': 'vue',
+};
+
+interface LatestRelease {
+  packageName: string;
   version: string;
-  need: DocumentationNeed;
+  content: string;
 }
 
 /**
- * Parses command line arguments.
+ * Extracts the latest release section from a changelog file.
+ * Simply grabs everything between the first ## [version] and the next ## [version].
  */
-function parseArgs(): { command: string; options: CLIOptions } {
-  const args = process.argv.slice(2);
-  const command = args[0] || 'help';
-  const options: CLIOptions = {
-    dryRun: args.includes('--dry-run'),
-    verbose: args.includes('--verbose'),
+function extractLatestRelease(changelogPath: string, packageName: string): LatestRelease | null {
+  const content = fs.readFileSync(changelogPath, 'utf-8');
+
+  // Match version headers: ## [4.87.0] or ## 4.87.0
+  const versionHeaderRegex = /^## \[?(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?)\]?/gm;
+
+  const matches = [...content.matchAll(versionHeaderRegex)];
+  if (matches.length === 0) return null;
+
+  const firstMatch = matches[0];
+  const version = firstMatch[1];
+  const startIndex = firstMatch.index!;
+
+  // Find the end (next version header or end of file)
+  const endIndex = matches.length > 1 ? matches[1].index! : content.length;
+
+  // Extract the section
+  const section = content.slice(startIndex, endIndex).trim();
+
+  // Skip if section is too short (likely just a version bump with no changes)
+  if (section.length < 50) return null;
+
+  return {
+    packageName,
+    version,
+    content: section,
   };
-
-  // Parse named arguments
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === '--package' && args[i + 1]) {
-      options.package = args[i + 1];
-      i++;
-    } else if (args[i] === '--version' && args[i + 1]) {
-      options.version = args[i + 1];
-      i++;
-    } else if (args[i] === '--output' && args[i + 1]) {
-      options.outputDir = args[i + 1];
-      i++;
-    }
-  }
-
-  return { command, options };
 }
 
 /**
@@ -64,327 +75,13 @@ function getRepoRoot(): string {
 }
 
 /**
- * Maps package names to their documentation flavor suffix.
+ * Generates a simple prompt with raw changelog content.
+ * Let Claude do the interpretation.
  */
-const PACKAGE_TO_FLAVOR: Record<string, string> = {
-  'instantsearch.js': 'js',
-  'react-instantsearch': 'react',
-  'vue-instantsearch': 'vue',
-};
-
-/**
- * Main packages that have widget/hook documentation.
- * Other packages (core, helpers, css, etc.) don't need separate widget docs.
- */
-const MAIN_DOC_PACKAGES = [
-  'instantsearch.js',
-  'react-instantsearch',
-  'vue-instantsearch',
-];
-
-/**
- * Gets the flavor for a package name.
- */
-function getPackageFlavor(packageName: string): string {
-  return PACKAGE_TO_FLAVOR[packageName] || 'js';
-}
-
-/**
- * Checks if a package is a main documentation package.
- */
-function isMainDocPackage(packageName: string): boolean {
-  return MAIN_DOC_PACKAGES.includes(packageName);
-}
-
-/**
- * Categorizes changes for prompt generation.
- */
-function categorizeChanges(changes: ChangeEntry[]): {
-  newWidgets: ChangeEntry[];
-  newConnectors: ChangeEntry[];
-  newHooks: ChangeEntry[];
-  modifiedComponents: ChangeEntry[];
-  breakingChanges: ChangeEntry[];
-  deprecations: ChangeEntry[];
-} {
-  const newWidgets = changes.filter(
-    (c) => c.type === 'feature' && isNewComponentChange(c, 'widget')
-  );
-  const newConnectors = changes.filter(
-    (c) => c.type === 'feature' && isNewComponentChange(c, 'connector')
-  );
-  const newHooks = changes.filter(
-    (c) => c.type === 'feature' && isNewComponentChange(c, 'hook')
-  );
-  const modifiedComponents = changes.filter(
-    (c) => c.type === 'feature' && !isNewComponentChange(c, 'widget') && !isNewComponentChange(c, 'connector') && !isNewComponentChange(c, 'hook')
-  );
-  const breakingChanges = changes.filter((c) => c.type === 'breaking' || c.isBreaking);
-  const deprecations = changes.filter((c) => c.type === 'deprecation');
-
-  return { newWidgets, newConnectors, newHooks, modifiedComponents, breakingChanges, deprecations };
-}
-
-/**
- * Formats changes for a single package section in the prompt.
- */
-function formatPackageChanges(
-  packageName: string,
-  version: string,
-  changes: ChangeEntry[],
-  priority: string,
-  contentTypes: string[]
-): string {
-  const { newWidgets, newConnectors, newHooks, modifiedComponents, breakingChanges, deprecations } = categorizeChanges(changes);
-  const flavor = getPackageFlavor(packageName);
-
-  let section = `### ${packageName} v${version}
-
-**Priority:** ${priority}
-**Suggested content types:** ${contentTypes.join(', ')}
-**Documentation flavor:** \`.${flavor}.mdx\` files
-
-`;
-
-  if (newWidgets.length > 0) {
-    section += `#### New Widgets
-${newWidgets.map((c) => `- **${c.scope || extractComponentName(c.description)}** - ${c.description}`).join('\n')}
-
-`;
-  }
-
-  if (newConnectors.length > 0) {
-    section += `#### New Connectors
-${newConnectors.map((c) => `- **${c.scope || extractComponentName(c.description)}** - ${c.description}`).join('\n')}
-
-`;
-  }
-
-  if (newHooks.length > 0) {
-    section += `#### New Hooks
-${newHooks.map((c) => `- **${c.scope || extractComponentName(c.description)}** - ${c.description}`).join('\n')}
-
-`;
-  }
-
-  if (modifiedComponents.length > 0) {
-    section += `#### Modified Components
-${modifiedComponents.map((c) => `- **${c.scope || 'General'}** - ${c.description}`).join('\n')}
-
-`;
-  }
-
-  if (breakingChanges.length > 0) {
-    section += `#### Breaking Changes
-${breakingChanges.map((c) => `- **${c.scope || 'General'}** - ${c.description}`).join('\n')}
-
-`;
-  }
-
-  if (deprecations.length > 0) {
-    section += `#### Deprecations
-${deprecations.map((c) => `- **${c.scope || 'General'}** - ${c.description}`).join('\n')}
-
-`;
-  }
-
-  section += `**Source Reference:**
-- Changelog: https://github.com/algolia/instantsearch/blob/master/packages/${packageName}/CHANGELOG.md
-- Source code: https://github.com/algolia/instantsearch/tree/master/packages/${packageName}/src
-
-`;
-
-  return section;
-}
-
-/**
- * Generates the prompt for Claude Code CLI (single package).
- */
-function generateClaudePrompt(
-  packageName: string,
-  version: string,
-  changes: ChangeEntry[],
-  priority: string,
-  contentTypes: string[]
-): string {
-  return generateMultiPackagePrompt([{
-    name: packageName,
-    version,
-    need: {
-      release: { version, packageName, changes, date: undefined },
-      changes,
-      priority: priority as 'high' | 'medium' | 'low' | 'none',
-      suggestedContentTypes: contentTypes as any[],
-    },
-  }]);
-}
-
-/**
- * Represents a deduplicated component change with its applicable flavors.
- */
-interface DeduplicatedChange {
-  name: string;
-  description: string;
-  type: 'widget' | 'connector' | 'hook' | 'modified' | 'breaking' | 'deprecation';
-  flavors: string[];
-  prNumber?: number;
-}
-
-/**
- * Deduplicates changes across packages and groups by component.
- * Same widget appearing in multiple packages becomes one entry with multiple flavors.
- */
-function deduplicateChanges(packages: ReleasedPackage[]): {
-  newWidgets: DeduplicatedChange[];
-  newConnectors: DeduplicatedChange[];
-  newHooks: DeduplicatedChange[];
-  modifiedComponents: DeduplicatedChange[];
-  breakingChanges: DeduplicatedChange[];
-  deprecations: DeduplicatedChange[];
-} {
-  const widgetMap = new Map<string, DeduplicatedChange>();
-  const connectorMap = new Map<string, DeduplicatedChange>();
-  const hookMap = new Map<string, DeduplicatedChange>();
-  const modifiedMap = new Map<string, DeduplicatedChange>();
-  const breakingMap = new Map<string, DeduplicatedChange>();
-  const deprecationMap = new Map<string, DeduplicatedChange>();
-
-  for (const pkg of packages) {
-    const flavor = getPackageFlavor(pkg.name);
-    const { newWidgets, newConnectors, newHooks, modifiedComponents, breakingChanges, deprecations } = categorizeChanges(pkg.need.changes);
-
-    for (const change of newWidgets) {
-      const key = change.scope || extractComponentName(change.description);
-      const existing = widgetMap.get(key);
-      if (existing) {
-        if (!existing.flavors.includes(flavor)) existing.flavors.push(flavor);
-      } else {
-        widgetMap.set(key, {
-          name: key,
-          description: change.description,
-          type: 'widget',
-          flavors: [flavor],
-          prNumber: change.prNumber,
-        });
-      }
-    }
-
-    for (const change of newConnectors) {
-      const key = change.scope || extractComponentName(change.description);
-      const existing = connectorMap.get(key);
-      if (existing) {
-        if (!existing.flavors.includes(flavor)) existing.flavors.push(flavor);
-      } else {
-        connectorMap.set(key, {
-          name: key,
-          description: change.description,
-          type: 'connector',
-          flavors: [flavor],
-          prNumber: change.prNumber,
-        });
-      }
-    }
-
-    for (const change of newHooks) {
-      const key = change.scope || extractComponentName(change.description);
-      const existing = hookMap.get(key);
-      if (existing) {
-        if (!existing.flavors.includes(flavor)) existing.flavors.push(flavor);
-      } else {
-        hookMap.set(key, {
-          name: key,
-          description: change.description,
-          type: 'hook',
-          flavors: [flavor],
-          prNumber: change.prNumber,
-        });
-      }
-    }
-
-    for (const change of modifiedComponents) {
-      const key = `${change.scope || 'General'}-${change.description.slice(0, 50)}`;
-      const existing = modifiedMap.get(key);
-      if (existing) {
-        if (!existing.flavors.includes(flavor)) existing.flavors.push(flavor);
-      } else {
-        modifiedMap.set(key, {
-          name: change.scope || 'General',
-          description: change.description,
-          type: 'modified',
-          flavors: [flavor],
-          prNumber: change.prNumber,
-        });
-      }
-    }
-
-    for (const change of breakingChanges) {
-      const key = `${change.scope || 'General'}-${change.description.slice(0, 50)}`;
-      const existing = breakingMap.get(key);
-      if (existing) {
-        if (!existing.flavors.includes(flavor)) existing.flavors.push(flavor);
-      } else {
-        breakingMap.set(key, {
-          name: change.scope || 'General',
-          description: change.description,
-          type: 'breaking',
-          flavors: [flavor],
-          prNumber: change.prNumber,
-        });
-      }
-    }
-
-    for (const change of deprecations) {
-      const key = `${change.scope || 'General'}-${change.description.slice(0, 50)}`;
-      const existing = deprecationMap.get(key);
-      if (existing) {
-        if (!existing.flavors.includes(flavor)) existing.flavors.push(flavor);
-      } else {
-        deprecationMap.set(key, {
-          name: change.scope || 'General',
-          description: change.description,
-          type: 'deprecation',
-          flavors: [flavor],
-          prNumber: change.prNumber,
-        });
-      }
-    }
-  }
-
-  return {
-    newWidgets: Array.from(widgetMap.values()),
-    newConnectors: Array.from(connectorMap.values()),
-    newHooks: Array.from(hookMap.values()),
-    modifiedComponents: Array.from(modifiedMap.values()),
-    breakingChanges: Array.from(breakingMap.values()),
-    deprecations: Array.from(deprecationMap.values()),
-  };
-}
-
-/**
- * Formats a deduplicated change for the prompt.
- */
-function formatDeduplicatedChange(change: DeduplicatedChange): string {
-  const flavorFiles = change.flavors.map((f) => `.${f}.mdx`).join(', ');
-  const flavorSuffix = change.flavors.length > 1
-    ? ` → update ${flavorFiles} files`
-    : ` → update ${flavorFiles} file`;
-  return `- **${change.name}**: ${change.description}${flavorSuffix}`;
-}
-
-/**
- * Generates a combined prompt for multiple packages.
- */
-function generateMultiPackagePrompt(packages: ReleasedPackage[]): string {
-  const packageList = packages.map((p) => `- ${p.name} v${p.version}`).join('\n');
-  const flavorsIncluded = [...new Set(packages.map((p) => getPackageFlavor(p.name)))];
-
-  const deduplicated = deduplicateChanges(packages);
-  const hasChanges = deduplicated.newWidgets.length > 0 ||
-    deduplicated.newConnectors.length > 0 ||
-    deduplicated.newHooks.length > 0 ||
-    deduplicated.modifiedComponents.length > 0 ||
-    deduplicated.breakingChanges.length > 0 ||
-    deduplicated.deprecations.length > 0;
+function generatePrompt(releases: LatestRelease[]): string {
+  const packageList = releases.map((r) => `- ${r.packageName} v${r.version}`).join('\n');
+  const flavors = releases.map((r) => PACKAGE_TO_FLAVOR[r.packageName]).filter(Boolean);
+  const uniqueFlavors = [...new Set(flavors)];
 
   let prompt = `You are updating documentation for InstantSearch releases:
 ${packageList}
@@ -396,434 +93,156 @@ InstantSearch has multiple flavors, each with its own documentation file suffix:
 - \`react-instantsearch\` (React) → \`.react.mdx\` files
 - \`vue-instantsearch\` (Vue) → \`.vue.mdx\` files
 
-Most widgets/hooks exist in multiple flavors with the same API. When a widget is added or modified, you typically need to update the documentation file for each relevant flavor.
-
-**Flavors in this release:** ${flavorsIncluded.map(f => `.${f}.mdx`).join(', ')}
+**Flavors in this release:** ${uniqueFlavors.map(f => `.${f}.mdx`).join(', ')}
 
 ## Task
 
-**IMPORTANT: Before making any changes, first explore the documentation structure.**
+1. **Explore first**: Use \`Glob\` to find documentation files - look for patterns like \`**/instantsearch/**\`, \`**/widgets/**\`, or \`**/api-reference/**\`
+2. **Read existing docs**: Look at a few existing widget/hook docs to understand the format
+3. **Read the changelogs below**: Understand what changed in this release
+4. **Update documentation**: Create or update docs for new features, modified components, breaking changes
 
-1. Use \`Glob\` to find documentation files: look for patterns like \`**/instantsearch/**\`, \`**/widgets/**\`, or \`**/api-reference/**\`
-2. Read a few existing widget/hook documentation files to understand the format
-3. Then update/create documentation for each change below
+## Changelog Entries
 
-## Changes to Document
-
-`;
-
-  if (!hasChanges) {
-    prompt += `No significant documentation changes detected.\n\n`;
-  }
-
-  if (deduplicated.newWidgets.length > 0) {
-    prompt += `### New Widgets
-${deduplicated.newWidgets.map(formatDeduplicatedChange).join('\n')}
+Below are the raw changelog entries for each package. Read them to understand what needs documentation.
 
 `;
-  }
 
-  if (deduplicated.newConnectors.length > 0) {
-    prompt += `### New Connectors
-${deduplicated.newConnectors.map(formatDeduplicatedChange).join('\n')}
+  for (const release of releases) {
+    prompt += `### ${release.packageName} v${release.version}
 
-`;
-  }
-
-  if (deduplicated.newHooks.length > 0) {
-    prompt += `### New Hooks
-${deduplicated.newHooks.map(formatDeduplicatedChange).join('\n')}
-
-`;
-  }
-
-  if (deduplicated.modifiedComponents.length > 0) {
-    prompt += `### Modified Components
-${deduplicated.modifiedComponents.map(formatDeduplicatedChange).join('\n')}
-
-`;
-  }
-
-  if (deduplicated.breakingChanges.length > 0) {
-    prompt += `### Breaking Changes
-${deduplicated.breakingChanges.map(formatDeduplicatedChange).join('\n')}
-
-`;
-  }
-
-  if (deduplicated.deprecations.length > 0) {
-    prompt += `### Deprecations
-${deduplicated.deprecations.map(formatDeduplicatedChange).join('\n')}
-
-`;
-  }
-
-  prompt += `## Source References
-
-${packages.map((p) => `- [${p.name} CHANGELOG](https://github.com/algolia/instantsearch/blob/master/packages/${p.name}/CHANGELOG.md)`).join('\n')}
-
-## Instructions
-
-1. **Explore first**: Use Glob and Read to understand the docs structure before making changes
-2. For new widgets/connectors/hooks, create new MDX files following the existing patterns
-3. For modified components, update the existing documentation to include new props/options
-4. Match the existing format and style exactly
-5. Include TypeScript types and code examples where appropriate
-6. For breaking changes, update the migration guide if applicable
-7. **Update all relevant flavor files**: Each change lists which \`.{flavor}.mdx\` files need updates
-
-## Documentation Format Reference
-
-Widget/Hook documentation typically follows this MDX structure:
-
-\`\`\`mdx
----
-title: ComponentName
-description: Brief description of the component
----
-
-<ParamField path="propName" type="string" required>
-  Description of the prop.
-</ParamField>
-
-<ParamField path="optionalProp" type="boolean" default="false">
-  Description of the optional prop.
-</ParamField>
+\`\`\`markdown
+${release.content}
 \`\`\`
 
-## Important
+`;
+  }
 
-- Only modify documentation files, do not modify any other files
-- Follow the existing documentation style and patterns
-- Make sure all code examples are correct and working
-- Do not add any placeholder content - only document what actually exists
-- **Explore the docs structure first before making changes**
+  prompt += `## Instructions
+
+- For new widgets/hooks, create new \`.{flavor}.mdx\` files following existing patterns
+- For modified components, update existing docs with new props/options
+- For breaking changes, update migration guides if applicable
+- Match the existing documentation format and style exactly
+- Only modify documentation files
+- Don't add placeholder content - only document what actually exists
+
+## Source Code Reference
+
+The InstantSearch source code is available at \`../instantsearch\` for reference.
+You can read files to understand the API, types, and implementation details.
+For example: \`../instantsearch/packages/instantsearch.js/src/widgets/\`
 `;
 
   return prompt;
 }
 
 /**
- * Detects if a change is adding a new component.
- */
-function isNewComponentChange(change: ChangeEntry, componentType: 'widget' | 'connector' | 'hook'): boolean {
-  const description = change.description.toLowerCase();
-  const addIndicators = ['add', 'new', 'introduce', 'implement', 'create'];
-
-  const hasAddIndicator = addIndicators.some((ind) => description.includes(ind));
-
-  if (componentType === 'widget') {
-    return hasAddIndicator && (description.includes('widget') || description.includes('component'));
-  }
-  if (componentType === 'connector') {
-    return hasAddIndicator && description.includes('connector');
-  }
-  if (componentType === 'hook') {
-    return hasAddIndicator && (description.includes('hook') || (change.scope?.startsWith('use') ?? false));
-  }
-
-  return false;
-}
-
-/**
- * Extracts a component name from the description.
- */
-function extractComponentName(description: string): string {
-  // Try to find PascalCase or backtick-quoted names
-  const pascalMatch = description.match(/`?([A-Z][a-zA-Z]+)`?/);
-  if (pascalMatch) {
-    return pascalMatch[1];
-  }
-
-  // Try to find camelCase names
-  const camelMatch = description.match(/`([a-z][a-zA-Z]+)`/);
-  if (camelMatch) {
-    return camelMatch[1];
-  }
-
-  return 'Unknown';
-}
-
-/**
  * Main entry point.
  */
 async function main(): Promise<void> {
-  const { command, options } = parseArgs();
+  const args = process.argv.slice(2);
+  const command = args[0] || 'help';
+  const verbose = args.includes('--verbose');
+
+  // Parse --output argument
+  let outputPath: string | undefined;
+  const outputIndex = args.indexOf('--output');
+  if (outputIndex !== -1 && args[outputIndex + 1]) {
+    outputPath = args[outputIndex + 1];
+  }
+
   const repoRoot = getRepoRoot();
   const packagesDir = path.join(repoRoot, 'packages');
 
-  if (options.verbose) {
+  if (verbose) {
     console.log('Repo root:', repoRoot);
     console.log('Packages dir:', packagesDir);
   }
 
-  switch (command) {
-    case 'parse-changelog': {
-      await runParseChangelog(packagesDir, options);
-      break;
-    }
+  if (command === 'generate-prompt') {
+    // Extract latest releases from main packages
+    const releases: LatestRelease[] = [];
 
-    case 'generate-prompt': {
-      await runGeneratePrompt(packagesDir, options);
-      break;
-    }
+    for (const packageName of MAIN_DOC_PACKAGES) {
+      const changelogPath = path.join(packagesDir, packageName, 'CHANGELOG.md');
 
-    case 'help':
-    default: {
-      printHelp();
-      break;
-    }
-  }
-}
+      if (!fs.existsSync(changelogPath)) {
+        if (verbose) console.log(`  Skipping ${packageName} (no CHANGELOG.md)`);
+        continue;
+      }
 
-/**
- * Parses changelogs and outputs classification.
- */
-async function runParseChangelog(
-  packagesDir: string,
-  options: CLIOptions
-): Promise<void> {
-  console.log('Parsing CHANGELOGs...');
+      const release = extractLatestRelease(changelogPath, packageName);
 
-  if (options.package) {
-    const changelogPath = path.join(packagesDir, options.package, 'CHANGELOG.md');
-    if (!fs.existsSync(changelogPath)) {
-      console.error(`CHANGELOG not found: ${changelogPath}`);
-      process.exit(1);
-    }
-
-    const releases = parseChangelog(changelogPath);
-    const latestRelease = getLatestRelease(releases, { skipEmpty: true });
-
-    if (latestRelease) {
-      console.log(`\nLatest release: ${latestRelease.packageName}@${latestRelease.version}`);
-      console.log(`Changes: ${latestRelease.changes.length}`);
-
-      const needs = classifyChanges([latestRelease]);
-      if (needs.length > 0) {
-        console.log(`Documentation priority: ${needs[0].priority}`);
-        console.log(`Suggested content types: ${needs[0].suggestedContentTypes.join(', ')}`);
-
-        // Output JSON for machine parsing
-        if (options.outputDir) {
-          const outputPath = path.join(options.outputDir, 'changelog-analysis.json');
-          const outputDirPath = path.dirname(outputPath);
-          if (!fs.existsSync(outputDirPath)) {
-            fs.mkdirSync(outputDirPath, { recursive: true });
-          }
-          fs.writeFileSync(
-            outputPath,
-            JSON.stringify(
-              {
-                packageName: latestRelease.packageName,
-                version: latestRelease.version,
-                date: latestRelease.date,
-                changes: latestRelease.changes,
-                priority: needs[0].priority,
-                contentTypes: needs[0].suggestedContentTypes,
-              },
-              null,
-              2
-            )
-          );
-          console.log(`\nWritten: ${outputPath}`);
-        }
+      if (release) {
+        releases.push(release);
+        if (verbose) console.log(`  Found: ${packageName}@${release.version}`);
+      } else {
+        if (verbose) console.log(`  Skipping ${packageName} (no significant changes)`);
       }
     }
-  } else {
-    const allChangelogs = parseAllChangelogs(packagesDir);
-    console.log(`Found ${allChangelogs.size} packages with CHANGELOGs`);
 
-    for (const [pkg, releases] of allChangelogs) {
-      const latest = getLatestRelease(releases);
-      if (latest) {
-        console.log(`  ${pkg}@${latest.version} (${latest.changes.length} changes)`);
-      }
-    }
-  }
-}
-
-/**
- * Detects all packages that were released (have documentation needs).
- * This is used when --package is not specified to auto-detect all released packages.
- *
- * Filters to:
- * - Only main documentation packages (instantsearch.js, react-instantsearch, vue-instantsearch)
- * - Only high or medium priority (skip low priority / bug-fix-only releases)
- */
-function detectReleasedPackages(packagesDir: string, verbose: boolean): ReleasedPackage[] {
-  const allChangelogs = parseAllChangelogs(packagesDir);
-  const releasedPackages: ReleasedPackage[] = [];
-
-  for (const [packageName, releases] of allChangelogs) {
-    // Skip non-main packages (they don't have separate widget docs)
-    if (!isMainDocPackage(packageName)) {
-      if (verbose) {
-        console.log(`  Skipping ${packageName} (not a main doc package)`);
-      }
-      continue;
-    }
-
-    const latestRelease = getLatestRelease(releases, { skipEmpty: true });
-    if (!latestRelease) continue;
-
-    const needs = classifyChanges([latestRelease]);
-    if (needs.length === 0 || needs[0].priority === 'none') continue;
-
-    // Skip low priority (bug-fix-only releases)
-    if (needs[0].priority === 'low') {
-      if (verbose) {
-        console.log(`  Skipping ${packageName}@${latestRelease.version} (low priority)`);
-      }
-      continue;
-    }
-
-    releasedPackages.push({
-      name: packageName,
-      version: latestRelease.version,
-      need: needs[0],
-    });
-
-    if (verbose) {
-      console.log(`  Detected: ${packageName}@${latestRelease.version} (${needs[0].priority} priority)`);
-    }
-  }
-
-  return releasedPackages;
-}
-
-/**
- * Generates a prompt for Claude Code CLI.
- * If --package is specified, generates for that single package.
- * Otherwise, auto-detects all released packages and generates a combined prompt.
- */
-async function runGeneratePrompt(
-  packagesDir: string,
-  options: CLIOptions
-): Promise<void> {
-  let releasedPackages: ReleasedPackage[];
-
-  if (options.package) {
-    // Single package mode (backward compatible)
-    const targetPackage = options.package;
-    const changelogPath = path.join(packagesDir, targetPackage, 'CHANGELOG.md');
-
-    if (!fs.existsSync(changelogPath)) {
-      console.error(`CHANGELOG not found: ${changelogPath}`);
-      process.exit(1);
-    }
-
-    const releases = parseChangelog(changelogPath);
-    const latestRelease = getLatestRelease(releases, { skipEmpty: true });
-
-    if (!latestRelease) {
-      console.error(`No releases found for ${targetPackage}`);
-      process.exit(1);
-    }
-
-    const needs = classifyChanges([latestRelease]);
-
-    if (needs.length === 0 || needs[0].priority === 'none') {
-      console.log('No documentation needs detected for this release');
-      process.exit(0);
-    }
-
-    const need = needs[0];
-    const version = options.version || latestRelease.version;
-
-    releasedPackages = [{
-      name: targetPackage,
-      version,
-      need,
-    }];
-  } else {
-    // Auto-detect mode: find all packages with documentation needs
-    console.log('Auto-detecting released packages with documentation needs...');
-    releasedPackages = detectReleasedPackages(packagesDir, options.verbose);
-
-    if (releasedPackages.length === 0) {
+    if (releases.length === 0) {
       console.log('No packages with documentation needs detected');
       process.exit(0);
     }
 
-    console.log(`Found ${releasedPackages.length} package(s) with documentation needs:`);
-    for (const pkg of releasedPackages) {
-      console.log(`  - ${pkg.name}@${pkg.version} (${pkg.need.priority} priority)`);
+    console.log(`Found ${releases.length} package(s) with changes:`);
+    for (const r of releases) {
+      console.log(`  - ${r.packageName}@${r.version}`);
     }
-  }
 
-  const prompt = generateMultiPackagePrompt(releasedPackages);
+    const prompt = generatePrompt(releases);
 
-  // Also output package info as JSON for the workflow
-  const packagesInfo = releasedPackages.map((p) => ({
-    name: p.name,
-    version: p.version,
-    priority: p.need.priority,
-  }));
+    // Also output package info as JSON for the workflow
+    const packagesInfo = releases.map((r) => ({
+      name: r.packageName,
+      version: r.version,
+    }));
 
-  if (options.outputDir) {
-    // Write prompt to file (for GitHub Actions)
-    const outputPath = options.outputDir.endsWith('.txt')
-      ? options.outputDir
-      : path.join(options.outputDir, 'prompt.txt');
-    const outputDirPath = path.dirname(outputPath);
-    if (!fs.existsSync(outputDirPath)) {
-      fs.mkdirSync(outputDirPath, { recursive: true });
+    if (outputPath) {
+      const resolvedPath = outputPath.endsWith('.txt')
+        ? outputPath
+        : path.join(outputPath, 'prompt.txt');
+      const outputDirPath = path.dirname(resolvedPath);
+
+      if (!fs.existsSync(outputDirPath)) {
+        fs.mkdirSync(outputDirPath, { recursive: true });
+      }
+
+      fs.writeFileSync(resolvedPath, prompt);
+      console.log(`Prompt written to: ${resolvedPath}`);
+
+      // Also write packages info JSON
+      const jsonPath = resolvedPath.replace('.txt', '-packages.json');
+      fs.writeFileSync(jsonPath, JSON.stringify(packagesInfo, null, 2));
+      console.log(`Packages info written to: ${jsonPath}`);
+    } else {
+      console.log('\n' + prompt);
     }
-    fs.writeFileSync(outputPath, prompt);
-    console.log(`Prompt written to: ${outputPath}`);
-
-    // Also write packages info JSON
-    const jsonPath = outputPath.replace('.txt', '-packages.json');
-    fs.writeFileSync(jsonPath, JSON.stringify(packagesInfo, null, 2));
-    console.log(`Packages info written to: ${jsonPath}`);
   } else {
-    // Print to stdout
-    console.log(prompt);
-  }
-}
-
-/**
- * Prints help information.
- */
-function printHelp(): void {
-  console.log(`
+    console.log(`
 InstantSearch Documentation Automation
 
 Usage: npx tsx src/index.ts <command> [options]
 
 Commands:
-  parse-changelog      Parse and classify CHANGELOG changes
   generate-prompt      Generate a prompt for Claude Code CLI
-  help                 Show this help message
 
 Options:
-  --dry-run            Run without making changes
   --verbose            Show detailed output
-  --package <name>     Target a specific package (omit to auto-detect all)
-  --version <ver>      Specify version (default: latest from changelog)
-  --output <dir>       Output directory/file for generated content
+  --output <path>      Output file path for the prompt
 
 Examples:
-  # Parse changelogs for all packages
-  npx tsx src/index.ts parse-changelog
+  # Generate prompt and print to stdout
+  npx tsx src/index.ts generate-prompt
 
-  # Parse changelog for a specific package
-  npx tsx src/index.ts parse-changelog --package react-instantsearch
-
-  # Auto-detect all released packages and generate combined prompt
+  # Generate prompt and save to file
   npx tsx src/index.ts generate-prompt --output ./prompt.txt
-
-  # Generate Claude prompt for a specific package
-  npx tsx src/index.ts generate-prompt --package instantsearch.js --output ./prompt.txt
-
-  # Use with Claude Code CLI (in docs-new directory)
-  claude -p "$(cat prompt.txt)" \\
-    --allowedTools "Read,Edit,Write,Bash(git diff *),Bash(git status *),Glob,Grep"
 `);
+  }
 }
 
-// Run main
 main().catch((error) => {
   console.error('Error:', error);
   process.exit(1);

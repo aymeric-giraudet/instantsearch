@@ -127,6 +127,7 @@ jobs:
           Example: instantsearch/packages/instantsearch.js/src/widgets/" \
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cd docs-new && npm run check:links),Bash(git diff *),Bash(git status *)" \
             --max-turns ${{ inputs.max_turns || 50 }} \
+            --verbose \
             --output-format text
 
       - name: Show what Claude would do (dry run)

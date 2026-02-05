@@ -127,8 +127,7 @@ jobs:
           Example: instantsearch/packages/instantsearch.js/src/widgets/" \
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cd docs-new && npm run check:links),Bash(git diff *),Bash(git status *)" \
             --max-turns ${{ inputs.max_turns || 50 }} \
-            --verbose \
-            --output-format text
+            --output-format stream-json 2>&1 | tee claude-output.log
 
       - name: Show what Claude would do (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.run_claude == false
